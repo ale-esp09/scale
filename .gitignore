@@ -1,0 +1,4 @@
+*.json
+!manifest.webmanifest
+*.txt
+!vendor/*.txt
