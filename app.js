@@ -61,7 +61,8 @@ function civNums(civico) {
   const c = norm(civico).replace(/ /g, "");
   const m = String(civico).match(/^(\d+)\s*-\s*(\d+)$/);
   if (m) { const s = new Set(); for (let i = +m[1]; i <= +m[2] && i - +m[1] < 40; i++) s.add(String(i)); return s; }
-  return new Set([c]);
+  const n = c.match(/^(\d+)/);
+  return new Set(n && n[1] !== c ? [c, n[1]] : [c]);
 }
 function rebuildIndex() {
   INDEX = [];
@@ -145,21 +146,28 @@ function searchName(q) {
 }
 
 /* ============ lettore (Tesseract, gira sul telefono) ============ */
-const ocr = { worker: null, ready: false, p: null };
+const ocr = { worker: null, workers: [], ready: false, p: null };
+const stats = { frames: 0, ms: 0 };
 function setOcrChip(t, cls) { const c = $("#ocrChip"); c.textContent = t; c.className = "chip " + (cls || ""); }
 function initOcr() {
   if (ocr.p) return ocr.p;
   ocr.p = (async () => {
     setOcrChip("Lettore: carico…");
     const base = document.baseURI;
-    const w = await Tesseract.createWorker("ita", 1, {
-      workerPath: new URL("vendor/worker.min.js", base).href,
-      corePath: new URL("vendor/core/", base).href,
-      langPath: new URL("vendor/lang", base).href,
-      workerBlobURL: false, cacheMethod: "none", gzip: true,
-    });
-    await w.setParameters({ tessedit_pageseg_mode: "6", preserve_interword_spaces: "1" });
-    ocr.worker = w; ocr.ready = true; setOcrChip("Lettore pronto", "ok");
+    const make = async () => {
+      const w = await Tesseract.createWorker("ita", 1, {
+        workerPath: new URL("vendor/worker.min.js", base).href,
+        corePath: new URL("vendor/core/", base).href,
+        langPath: new URL("vendor/lang", base).href,
+        workerBlobURL: false, cacheMethod: "none", gzip: true,
+      });
+      await w.setParameters({ tessedit_pageseg_mode: "6", preserve_interword_spaces: "1" });
+      return w;
+    };
+    const w = await make();
+    ocr.worker = w; ocr.workers = [w]; ocr.ready = true; setOcrChip("Lettore pronto", "ok");
+    // con un telefono a più core, un secondo lettore lavora in parallelo: risultati più frequenti
+    if ((navigator.hardwareConcurrency || 2) >= 4) make().then(w2 => { ocr.workers.push(w2); if (cam.stream) workerLoop(w2, 1); }).catch(() => { });
     return w;
   })().catch(e => { console.error(e); ocr.p = null; setOcrChip("Lettore: errore", "warn"); throw e; });
   return ocr.p;
@@ -196,8 +204,8 @@ $("#torchBtn").onclick = async () => { if (!cam.track) return; cam.torch = !cam.
 document.addEventListener("visibilitychange", () => { if (document.hidden) stopCam(); else startCam(); });
 
 // ritaglia dal video la zona del riquadro giallo
-const frameCv = document.createElement("canvas");
-function grabBox() {
+const frameCvs = [document.createElement("canvas"), document.createElement("canvas")];
+function grabBox(frameCv) {
   const vw = video.videoWidth, vh = video.videoHeight; if (!vw || !vh) return null;
   const camEl = $("#cam"), boxEl = $("#box");
   const cw = camEl.clientWidth, ch = camEl.clientHeight;
@@ -205,7 +213,7 @@ function grabBox() {
   const sx = Math.max(0, (boxEl.offsetLeft - ox) / sc), sy = Math.max(0, (boxEl.offsetTop - oy) / sc);
   const sw = Math.min(vw - sx, boxEl.offsetWidth / sc), sh = Math.min(vh - sy, boxEl.offsetHeight / sc);
   if (!(sw > 20 && sh > 20)) return null;
-  const k = Math.min(1, 1200 / sw);
+  const k = Math.min(1, 1000 / sw);
   frameCv.width = Math.round(sw * k); frameCv.height = Math.round(sh * k);
   const g = frameCv.getContext("2d", { willReadFrequently: true });
   g.drawImage(video, sx, sy, sw, sh, 0, 0, frameCv.width, frameCv.height);
@@ -216,39 +224,53 @@ function grabBox() {
   g.putImageData(id, 0, 0);
   return frameCv;
 }
-const seen = { key: null, n: 0, shown: null };
+const seen = { key: null, n: 0, shown: null, holdUntil: 0 };
 async function runLoop() {
   if (cam.loop) return; cam.loop = true;
   try { await initOcr(); } catch (e) { cam.loop = false; camMsg("Il lettore non si è avviato. Controlla la connessione e ricarica la pagina (serve solo la prima volta)."); return; }
-  while (cam.stream) {
-    if (!cam.paused && video.readyState >= 2 && INDEX.length) {
-      try { const cv = grabBox(); if (cv) { const r = await ocr.worker.recognize(cv); onText(r.data.text || ""); } }
-      catch (e) { console.warn(e); await sleep(300); }
-    }
-    await sleep(80);
-  }
+  const loops = ocr.workers.map((w, i) => workerLoop(w, i));
+  await Promise.all(loops);
   cam.loop = false;
+}
+const busy = new Set();
+async function workerLoop(w, i) {
+  if (busy.has(i)) return; busy.add(i);
+  if (i > 0) await sleep(250); // sfasato rispetto al primo
+  try {
+    while (cam.stream) {
+      if (!cam.paused && !voice.active && video.readyState >= 2 && INDEX.length) {
+        try {
+          const cv = grabBox(frameCvs[i]);
+          if (cv) { const t0 = performance.now(); const r = await w.recognize(cv); stats.frames++; stats.ms += performance.now() - t0; onText(r.data.text || ""); }
+          else await sleep(100);
+        } catch (e) { console.warn(e); await sleep(300); }
+        await sleep(0);
+      } else await sleep(150);
+    }
+  } finally { busy.delete(i); }
 }
 function onText(text) {
   $("#ocrTxt").textContent = text.trim();
   const res = matchText(text);
   const b = res[0];
+  if (Date.now() < seen.holdUntil) return; // c'e' un risultato vocale sullo schermo
   if (!b || b.score < 0.7) { seen.key = null; seen.n = 0; return; }
   const key = b.e.c.id + "|" + b.e.r.id;
   if (key === seen.key) seen.n++; else { seen.key = key; seen.n = 1; }
-  const sure = b.score >= 0.95 && b.viaHit > 0 && b.civHit;
+  const rival = res.slice(1).some(x => x.total >= b.total - 0.1 && (x.e.r.scala !== b.e.r.scala || x.e.r.interno !== b.e.r.interno || x.e.c.id !== b.e.c.id));
+  const sure = !rival && ((b.score >= 0.88 && b.viaHit > 0) || b.score >= 0.97);
   if (seen.n >= 2 || sure) {
     if (key !== seen.shown) { seen.shown = key; if (navigator.vibrate) navigator.vibrate(60); }
     showResult(res);
   }
 }
-function showResult(res) {
+function showResult(res, opt = {}) {
   const b = res[0];
   const rivali = res.slice(1).filter(x => x.total >= b.total - 0.1 && (x.e.r.scala !== b.e.r.scala || x.e.r.interno !== b.e.r.interno || x.e.c.id !== b.e.c.id));
-  const altri = res.slice(1).filter(x => x.total >= b.total * 0.8).slice(0, 3);
+  const altri = res.slice(1).filter(x => x.total >= b.total * 0.8).slice(0, opt.maxAlt || 3);
   const box = $("#result");
   box.className = "result " + (rivali.length ? "warn" : "ok");
-  box.innerHTML = `<div class="nm">${esc(b.e.r.nome)}</div>
+  box.innerHTML = `${opt.heard ? `<div class="small mute" style="margin-bottom:4px">🎤 «${esc(opt.heard)}»</div>` : ""}<div class="nm">${esc(b.e.r.nome)}</div>
     <div class="si">${b.e.r.scala ? `<span>Scala ${esc(b.e.r.scala)}</span>` : ""}${b.e.r.interno ? `<span>Int. ${esc(b.e.r.interno)}</span>` : ""}${!b.e.r.scala && !b.e.r.interno ? "—" : ""}</div>
     <div class="where">${esc(b.e.c.via)} ${esc(b.e.c.civico)}${b.e.r.note ? " · " + esc(b.e.r.note) : ""}</div>
     ${b.e.c.codice ? `<div style="margin-top:4px">🔑 <b>${esc(b.e.c.codice)}</b></div>` : ""}
@@ -415,6 +437,81 @@ $("#expBtn").onclick = () => {
 $("#wipeBtn").onclick = () => ask("Cancellare <b>tutti</b> i nomi da questo telefono? Non si può annullare.", "Cancella tutto", () => { data = { civici: {} }; saveLocal(); rebuildIndex(); renderStats(); toast("Dati cancellati"); });
 function renderStats() { const l = civList(); $("#stats").textContent = `Su questo telefono: ${l.length} civici, ${l.reduce((s, c) => s + (c.residenti || []).length, 0)} nomi.`; }
 
+
+/* ============ voce: premi 🎤 e di' il nome ============ */
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+const voice = { active: false, rec: null, mode: null };
+const VOICE_OK = "scale.voiceCloudOk";
+async function voiceMode() {
+  if (!SR) return null;
+  // prima scelta: riconoscimento sul telefono (nessun audio esce dal telefono)
+  try {
+    if (typeof SR.available === "function") {
+      const st = await SR.available({ langs: ["it-IT"], processLocally: true });
+      if (st === "available") return "local";
+      if ((st === "downloadable" || st === "downloading") && typeof SR.install === "function") {
+        toast("Scarico la voce italiana sul telefono…", 4000);
+        if (await SR.install({ langs: ["it-IT"], processLocally: true })) return "local";
+      }
+    }
+  } catch (e) { }
+  return "cloud";
+}
+function askCloud() {
+  return new Promise(res => {
+    let ok = false; try { ok = localStorage.getItem(VOICE_OK) === "1"; } catch (e) { }
+    if (ok) return res(true);
+    modal(`<h2>🎤 Ricerca con la voce</h2><p>Su questo telefono la voce viene trasformata in testo dal <b>servizio vocale di Google</b>: viene inviato solo quello che dici mentre il microfono è rosso (il nome), <b>mai l'elenco dei nomi</b>, che resta sul telefono.</p><p class="small mute">Se preferisci di no, puoi sempre scrivere il nome nella scheda Cerca.</p>
+      <div class="row"><button class="btn grow" id="mNo">No</button><button class="btn pri grow" id="mOk">Va bene</button></div>`, m => {
+      $("#mNo", m).onclick = () => { closeModal(); res(false); };
+      $("#mOk", m).onclick = () => { try { localStorage.setItem(VOICE_OK, "1"); } catch (e) { } closeModal(); res(true); };
+    });
+  });
+}
+function vMsg(t) { const m = $("#vMsg"); if (!m) return; if (t) { m.textContent = t; m.classList.remove("hidden"); } else m.classList.add("hidden"); }
+function setMic(on) { document.querySelectorAll(".mic").forEach(b => { b.classList.toggle("on", on); b.textContent = on ? "■" : "🎤"; }); }
+async function startVoice(where) {
+  if (voice.active) { try { voice.rec && voice.rec.stop(); } catch (e) { } return; }
+  if (!SR) { toast("Questo browser non ha il riconoscimento vocale. Usa Chrome.", 3500); return; }
+  if (!INDEX.length) { toast("Carica prima i nomi da ⚙️ Altro"); return; }
+  voice.active = true; setMic(true);
+  if (!voice.mode) voice.mode = await voiceMode();
+  if (voice.mode === "cloud" && !(await askCloud())) { voice.active = false; setMic(false); return; }
+  const rec = new SR(); voice.rec = rec;
+  rec.lang = "it-IT"; rec.interimResults = true; rec.maxAlternatives = 4; rec.continuous = false;
+  if (voice.mode === "local") rec.processLocally = true;
+  let done = false;
+  vMsg("Parla: di' il nome…");
+  rec.onresult = e => {
+    const r = e.results[e.results.length - 1];
+    vMsg("«" + r[0].transcript + "»");
+    if (where === "search") { $("#q").value = r[0].transcript; runSearch(); }
+    if (r.isFinal) { done = true; const alts = []; for (let i = 0; i < r.length; i++) alts.push(r[i].transcript); onVoice(alts, where); }
+  };
+  rec.onerror = e => {
+    const msg = { "not-allowed": "Permesso microfono negato: consentilo dalle impostazioni del sito.", "service-not-allowed": "Permesso microfono negato.", "no-speech": "Non ho sentito niente, riprova.", "network": "Per la voce serve internet (oppure installa la voce italiana sul telefono).", "audio-capture": "Il microfono non è disponibile." }[e.error];
+    if (e.error === "language-not-supported" && voice.mode === "local") { voice.mode = "cloud"; toast("Voce sul telefono non disponibile: riprova"); return; }
+    if (msg) toast(msg, 3500);
+  };
+  rec.onend = () => { voice.active = false; voice.rec = null; setMic(false); setTimeout(() => vMsg(""), done ? 1500 : 0); };
+  try { rec.start(); } catch (e) { voice.active = false; setMic(false); toast("Non riesco ad avviare il microfono"); }
+}
+function onVoice(alts, where) {
+  let best = null, heard = alts[0];
+  for (const a of alts) {
+    let res = matchText(a);
+    if (!res.length) res = searchName(a).slice(0, 8).map(x => ({ e: x.e, score: 1, total: x.s }));
+    if (res.length && (!best || res[0].score > best[0].score)) { best = res; heard = a; }
+    if (best && best[0].score >= 0.95) break;
+  }
+  if (where === "search") { $("#q").value = heard; runSearch(); return; }
+  seen.holdUntil = Date.now() + 8000; seen.key = null; seen.n = 0;
+  if (best) { if (navigator.vibrate) navigator.vibrate(60); showResult(best, { heard, maxAlt: 7 }); }
+  else { const box = $("#result"); box.className = "result warn"; box.innerHTML = `<div class="small mute">🎤 «${esc(heard)}»</div><div class="nm" style="margin-top:8px">Nome non trovato</div><div class="where">Riprova dicendo solo il cognome, scandito.</div>`; }
+}
+$("#micBtn").onclick = () => startVoice("scan");
+$("#micBtn2").onclick = () => startVoice("search");
+
 /* ============ navigazione ============ */
 function go(v) {
   document.querySelectorAll("nav button").forEach(b => b.classList.toggle("on", b.dataset.v === v));
@@ -430,5 +527,10 @@ document.querySelectorAll("nav button").forEach(b => b.onclick = () => go(b.data
 loadLocal(); rebuildIndex(); renderStats();
 initOcr().catch(() => { });
 startCam();
-if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => { });
-window.__scale = { matchText, parseTabulati, importCivici, get INDEX() { return INDEX; } };
+if ("serviceWorker" in navigator) {
+  const hadCtrl = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.register("sw.js").then(r => r.update()).catch(() => { });
+  let reloaded = false;
+  navigator.serviceWorker.addEventListener("controllerchange", () => { if (hadCtrl && !reloaded) { reloaded = true; location.reload(); } });
+}
+window.__scale = { matchText, parseTabulati, importCivici, onVoice, stats, get INDEX() { return INDEX; } };

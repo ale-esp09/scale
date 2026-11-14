@@ -46,6 +46,12 @@
   .cam .ctrl{position:absolute;right:8px;bottom:8px;display:flex;gap:8px}
   .cam .ctrl button{border:0;border-radius:99px;background:rgba(0,0,0,.55);color:#fff;font-size:20px;width:46px;height:46px}
   .cam .ctrl button.on{background:var(--acc);color:#111}
+  .cam .lctrl{position:absolute;left:8px;bottom:8px}
+  .mic{border:0;border-radius:99px;background:var(--acc);color:#111;font-size:26px;width:58px;height:58px;box-shadow:0 2px 6px rgba(0,0,0,.35)}
+  .mic.on{background:#dc2626;color:#fff;animation:pulse 1s infinite}
+  @keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.08)}}
+  .vmsg{position:absolute;left:0;right:0;bottom:74px;text-align:center;color:#fff;font-size:18px;font-weight:700;text-shadow:0 1px 3px #000;padding:0 12px}
+  .mic.small{width:46px;height:46px;font-size:20px;box-shadow:none}
   .result{border-radius:18px;padding:14px;background:#fff;border:3px solid var(--line);text-align:center;margin-top:12px;min-height:150px;transition:border-color .2s}
   .result.ok{border-color:var(--ok)}.result.warn{border-color:var(--warn)}
   .result .si{font-size:44px;font-weight:800;line-height:1.1;margin:4px 0}
@@ -80,6 +86,8 @@
       <video id="video" playsinline muted autoplay></video>
       <div class="box" id="box"></div>
       <div class="hint">Metti nome e indirizzo nel riquadro</div>
+      <div class="lctrl"><button id="micBtn" class="mic" title="Cerca con la voce">🎤</button></div>
+      <div class="vmsg hidden" id="vMsg"></div>
       <div class="ctrl">
         <button id="torchBtn" class="hidden" title="Torcia">🔦</button>
         <button id="pauseBtn" title="Pausa">⏸</button>
@@ -91,7 +99,7 @@
   </section>
 
   <section id="v-search" class="view">
-    <div class="card"><input id="q" type="search" placeholder="Scrivi il cognome…" autocomplete="off"></div>
+    <div class="card row"><input id="q" type="search" placeholder="Scrivi o detta il cognome…" autocomplete="off" class="grow"><button id="micBtn2" class="mic small" title="Detta il nome">🎤</button></div>
     <div id="searchRes" class="card"><div class="empty">Scrivi almeno 2 lettere.</div></div>
   </section>
 
@@ -116,6 +124,7 @@
     <div class="card">
       <h2>Privacy</h2>
       <p class="small" style="margin-top:0">I nomi sono salvati <b>solo su questo telefono</b>. La lettura delle buste avviene sul telefono: nessuna immagine e nessun nome viene inviato su internet. Questa pagina non contiene dati: è solo il programma.</p>
+      <p class="small" style="margin-top:0">🎤 <b>Voce:</b> se il telefono ha il riconoscimento vocale italiano installato, la voce resta sul telefono. Altrimenti, solo se lo autorizzi, il nome che pronunci passa dal servizio vocale di Google per diventare testo; l'elenco dei nomi non viene mai inviato.</p>
       <p id="stats" class="small mute"></p>
       <button class="btn bad small" id="wipeBtn">Cancella tutti i nomi</button>
     </div>

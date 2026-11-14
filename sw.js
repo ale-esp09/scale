@@ -1,5 +1,5 @@
 // Tiene in memoria il programma per usarlo anche senza internet. Non contiene dati.
-const V = "scale-v1";
+const V = "scale-v2";
 const FILES = ["./", "index.html", "app.js", "manifest.webmanifest", "icon-192.png", "icon-512.png",
   "vendor/tesseract.min.js", "vendor/worker.min.js",
   "vendor/core/tesseract-core-simd-lstm.wasm.js", "vendor/core/tesseract-core-lstm.wasm.js",
